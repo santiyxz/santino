@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>SANTINO</title>
+<style>
+:root{--bg:#000;--purple:#a855f7;--hot:#d946ef;--text:#eee}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg)}
+body{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;cursor:none;user-select:none}
+.top-rule{position:fixed;z-index:5;top:0;left:0;width:100%;height:4px;background:#171717;border-bottom:1px solid #242424}
+#ambient{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
+main{position:fixed;inset:0;display:grid;place-items:center}
+#particle-area{position:relative;width:min(82vw,820px);height:min(48vh,350px);min-height:220px;touch-action:pan-y;cursor:none;outline:none}
+#particle-canvas{display:block;width:100%;height:100%}
+#particle-area:after{content:"";position:absolute;inset:20%;z-index:-1;border-radius:50%;background:radial-gradient(ellipse,rgba(117,34,205,.075),transparent 70%);filter:blur(24px);pointer-events:none}
+#click-hint{position:absolute;left:50%;top:calc(100% + 17px);transform:translateX(-50%);white-space:nowrap;font-size:9px;letter-spacing:.25em;text-transform:uppercase;color:#33243e;opacity:.8;transition:opacity .3s}
+#particle-area:hover #click-hint{color:#684184}
+.footer{position:fixed;bottom:7.1%;left:50%;transform:translateX(-50%);font-size:11px;letter-spacing:.23em;color:#29252d;white-space:nowrap}
+.counter{position:fixed;right:22px;bottom:17px;display:flex;align-items:center;gap:6px;color:#777;font-size:11px}
+.counter svg{width:15px;height:15px}
+#audio-status{position:fixed;top:23px;right:23px;font-size:9px;letter-spacing:.18em;color:#74558d;opacity:0;transition:opacity .3s}
+#audio-status.on{opacity:.9}
+#cursor{position:fixed;left:0;top:0;width:6px;height:6px;border-radius:50%;background:#e9d5ff;box-shadow:0 0 10px #a855f7,0 0 22px #9333ea;z-index:20;pointer-events:none;transform:translate(-50%,-50%);opacity:0}
+.trail-dot{position:fixed;left:0;top:0;width:3px;height:3px;border-radius:50%;background:#a855f7;box-shadow:0 0 8px #9333ea;z-index:19;pointer-events:none;transform:translate(-50%,-50%);opacity:0}
+@media(pointer:coarse){body,#particle-area,#cursor,.trail-dot{display:none}#click-hint{opacity:.85}}
+@media(max-width:600px){#particle-area{width:94vw;height:34vh;min-height:180px}.footer{bottom:8%;font-size:9px}.counter{right:12px;bottom:12px}#audio-status{top:15px;right:14px}}
+@media(prefers-reduced-motion:reduce){#particle-area:after,#click-hint,#audio-status{transition:none}}
+</style>
+</head>
+<body>
+<div class="top-rule"></div>
+<canvas id="ambient" aria-hidden="true"></canvas>
+<main>
+  <div id="particle-area" role="button" tabindex="0" aria-label="Click to enter and play music">
+    <canvas id="particle-canvas" aria-hidden="true"></canvas>
+    <span id="click-hint">click to enter</span>
+  </div>
+</main>
+<div class="footer">pwned by santino</div>
+<div id="audio-status">NOW PLAYING</div>
+<div class="counter" aria-label="Local visit count">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+  <span id="visits">1</span>
+</div>
+<div id="cursor"></div>
+<audio id="music" src="music.mp3" preload="auto" loop></audio>
+<script>
+(() => {
+  'use strict';
+
+  // EDIT THESE SETTINGS
+  const SETTINGS = {
+    text: '$ANTINO',
+    footer: 'pwned by santino',
+    audio: 'https://file.garden/arIVMF8UTouAgBFb/luwz.mp3',
+    particleColor: '#963cff',
+    highlightColor: '#d946ef',
+    particleSize: 1.65,
+    density: 4,
+    intro: 'gather',       // gather | rain | spiral | scan
+    gatherDuration: 1750,
+    stagger: 400,
+    scatter: 180,
+    pointerRepel: 38,
+    repelRadius: 118,
+    clickBurst: true,
+    burstStrength: 1.05,
+    idleDrift: .42
+  };
+
+  document.querySelector('.footer').textContent = SETTINGS.footer;
+  const area = document.getElementById('particle-area');
+  const canvas = document.getElementById('particle-canvas');
+  const ctx = canvas.getContext('2d', {alpha:true});
+  const ambient = document.getElementById('ambient');
+  const bg = ambient.getContext('2d');
+  const audio = document.getElementById('music');
+  audio.src = SETTINGS.audio;
+
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const rand=(a,b)=>a+Math.random()*(b-a);
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let w=0,h=0,dpr=1,particles=[],raf=0,last=0,startAt=0,gathering=true,bursting=false;
+  let pointer={x:-1000,y:-1000,sx:-1000,sy:-1000,active:false};
+  let bgDots=[];
+  const TAU=Math.PI*2;
+  const rgb=(hex)=>{let h=hex.replace('#','');if(h.length===3)h=h.split('').map(x=>x+x).join('');let n=parseInt(h,16);return [(n>>16)&255,(n>>8)&255,n&255]};
+  const base=rgb(SETTINGS.particleColor),hot=rgb(SETTINGS.highlightColor);
+  const colorMix=(t,a=1)=>`rgba(${Math.round(base[0]+(hot[0]-base[0])*t)},${Math.round(base[1]+(hot[1]-base[1])*t)},${Math.round(base[2]+(hot[2]-base[2])*t)},${a})`;
+
+  function sampleText(){
+    const rect=area.getBoundingClientRect();
+    w=Math.max(1,rect.width);h=Math.max(1,rect.height);dpr=Math.min(devicePixelRatio||1,2);
+    canvas.width=Math.floor(w*dpr);canvas.height=Math.floor(h*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    const off=document.createElement('canvas'),o=off.getContext('2d',{willReadFrequently:true});
+    let size=Math.min(w/(SETTINGS.text.length*.68),h*.53);
+    size=Math.max(24,size);
+    off.width=Math.ceil(w);off.height=Math.ceil(h);
+    o.font=`900 ${size}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+    o.textAlign='center';o.textBaseline='middle';o.fillStyle='#fff';
+    o.fillText(SETTINGS.text,w/2,h/2,w*.94);
+    const pixels=o.getImageData(0,0,off.width,off.height).data,targets=[];
+    for(let y=0;y<off.height;y+=SETTINGS.density)for(let x=0;x<off.width;x+=SETTINGS.density){
+      const alpha=pixels[(y*off.width+x)*4+3];
+      if(alpha>35)targets.push({x,y,alpha:alpha/255});
+    }
+    const max=4200,stride=Math.max(1,Math.ceil(targets.length/max));
+    const selected=targets.filter((_,i)=>i%stride===0);
+    particles=selected.map((p,i)=>{
+      const seed=((i*9301+49297)%233280)/233280;
+      const depth=.45+(((i*233+97)%1000)/1000)*.9;
+      const angle=seed*TAU,dist=(reduced?0:SETTINGS.scatter)*(.35+depth*.75);
+      return {tx:p.x,ty:p.y,x:p.x+Math.cos(angle)*dist,y:p.y+Math.sin(angle)*dist,
+        sx:p.x+Math.cos(angle)*dist,sy:p.y+Math.sin(angle)*dist,
+        seed,depth,alpha:p.alpha,vx:0,vy:0,ox:0,oy:0,phase:rand(0,TAU),size:SETTINGS.particleSize*rand(.72,1.25)};
+    });
+    startAt=performance.now();gathering=!reduced;last=0;wake();
+  }
+
+  function wake(){if(!raf)raf=requestAnimationFrame(loop)}
+  function burst(x,y){
+    const radius=90+70*Math.sqrt(SETTINGS.burstStrength)+SETTINGS.repelRadius*.25;
+    for(const p of particles){
+      const dx=p.x-x,dy=p.y-y,d=Math.hypot(dx,dy);
+      if(d>radius||d===0)continue;
+      const f=1-d/radius,power=950*SETTINGS.burstStrength*(.2+.8*f*f)*(.65+p.depth*.45);
+      const a=Math.atan2(dy,dx)+(p.seed-.5)*.9;
+      p.vx+=Math.cos(a)*power;p.vy+=Math.sin(a)*power;
+    }
+    bursting=true;wake();
+  }
+
+  function loop(now){
+    raf=0;
+    const dt=last?Math.min(.05,Math.max(0,(now-last)/1000)):1/60;last=now;
+    const frames=Math.max(dt*60,.001),follow=reduced?1:1-Math.pow(.78,frames);
+    pointer.sx+=(pointer.x-pointer.sx)*(1-Math.pow(.82,frames));
+    pointer.sy+=(pointer.y-pointer.sy)*(1-Math.pow(.82,frames));
+    ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    let complete=true,settling=false,moving=false;
+    const elapsed=now-startAt;
+    for(const p of particles){
+      let tx=p.tx,ty=p.ty;
+      if(gathering){
+        const delay=p.seed*SETTINGS.stagger;
+        const t=clamp((elapsed-delay)/SETTINGS.gatherDuration,0,1);
+        const ease=1-Math.pow(1-t,3);
+        tx=p.sx+(p.tx-p.sx)*ease;ty=p.sy+(p.ty-p.sy)*ease;
+        if(t<1)complete=false;
+      }else if(!reduced){
+        tx+=Math.sin(now*.0009+p.phase)*SETTINGS.idleDrift*p.depth;
+        ty+=Math.cos(now*.00075+p.phase)*SETTINGS.idleDrift*p.depth;
+      }
+      if(bursting){
+        p.vx+=(-18*p.ox-7.5*p.vx)*dt;p.vy+=(-18*p.oy-7.5*p.vy)*dt;
+        p.ox+=p.vx*dt;p.oy+=p.vy*dt;
+        if(Math.abs(p.ox)+Math.abs(p.oy)>.05||Math.abs(p.vx)+Math.abs(p.vy)>1)settling=true;
+        else{p.ox=p.oy=p.vx=p.vy=0}
+        tx+=p.ox;ty+=p.oy;
+      }
+      if(pointer.active&&!reduced){
+        const dx=tx-pointer.sx,dy=ty-pointer.sy,d=Math.hypot(dx,dy);
+        if(d>0&&d<SETTINGS.repelRadius){
+          const force=Math.pow(1-d/SETTINGS.repelRadius,2)*SETTINGS.pointerRepel;
+          tx+=dx/d*force;ty+=dy/d*force;
+        }
+      }
+      const mx=(tx-p.x)*follow,my=(ty-p.y)*follow;
+      p.x+=mx;p.y+=my;if(Math.abs(mx)+Math.abs(my)>.02)moving=true;
+      const distance=Math.hypot(p.x-p.tx,p.y-p.ty);
+      const heat=clamp((distance-3)/36,0,1);
+      const alpha=(.35+.65*p.alpha)*(gathering?.62:1);
+      ctx.fillStyle=colorMix(heat,alpha);
+      ctx.beginPath();ctx.arc(p.x,p.y,p.size/2,0,TAU);ctx.fill();
+    }
+    if(gathering&&complete)gathering=false;
+    if(bursting&&!settling)bursting=false;
+    if(!reduced){
+      ctx.save();ctx.globalCompositeOperation='lighter';ctx.shadowColor=SETTINGS.highlightColor;ctx.shadowBlur=8;
+      // A restrained bloom over the brighter particle field.
+      ctx.restore();
+    }
+    if(gathering||moving||pointer.active||bursting||SETTINGS.idleDrift>0)wake();
+  }
+
+  function resize(){
+    const d=Math.min(devicePixelRatio||1,2);
+    ambient.width=Math.floor(innerWidth*d);ambient.height=Math.floor(innerHeight*d);
+    bg.setTransform(d,0,0,d,0,0);
+    bgDots=Array.from({length:Math.min(70,Math.floor(innerWidth*innerHeight/22000))},()=>({x:rand(0,innerWidth),y:rand(0,innerHeight),r:rand(.35,.8),a:rand(.04,.14),v:rand(.04,.16)}));
+    sampleText();
+  }
+  function drawAmbient(){
+    bg.clearRect(0,0,innerWidth,innerHeight);
+    for(const p of bgDots){p.y-=p.v;if(p.y<0){p.y=innerHeight;p.x=rand(0,innerWidth)}
+      bg.beginPath();bg.arc(p.x,p.y,p.r,0,TAU);bg.fillStyle=`rgba(155,80,225,${p.a})`;bg.fill();}
+    requestAnimationFrame(drawAmbient);
+  }
+
+  // A small cursor point with a dotted tail, in addition to the component's own repel interaction.
+  const cursor=document.getElementById('cursor');
+  const trail=Array.from({length:12},()=>{const el=document.createElement('i');el.className='trail-dot';document.body.appendChild(el);return {el,x:innerWidth/2,y:innerHeight/2}});
+  let mx=innerWidth/2,my=innerHeight/2;
+  addEventListener('pointermove',e=>{
+    mx=e.clientX;my=e.clientY;
+    const rect=canvas.getBoundingClientRect();
+    pointer.x=e.clientX-rect.left;pointer.y=e.clientY-rect.top;pointer.active=true;wake();
+    cursor.style.opacity='1';trail.forEach(t=>t.el.style.opacity='.72');
+  });
+  addEventListener('pointerleave',()=>{pointer.active=false;cursor.style.opacity='0';trail.forEach(t=>t.el.style.opacity='0');wake()});
+  function cursorFrame(){
+    cursor.style.left=mx+'px';cursor.style.top=my+'px';
+    let x=mx,y=my;
+    trail.forEach((t,i)=>{t.x+=(x-t.x)*(.34-i*.012);t.y+=(y-t.y)*(.34-i*.012);t.el.style.left=t.x+'px';t.el.style.top=t.y+'px';x=t.x;y=t.y});
+    requestAnimationFrame(cursorFrame);
+  }
+
+  // Audio starts only after a real user gesture (browser autoplay policy).
+  let playing=false;
+  const hint=document.getElementById('click-hint'),status=document.getElementById('audio-status');
+  async function enter(){
+    if(playing)return;
+    try{
+      await audio.play();
+      playing=true;
+      hint.textContent='welcome';
+      status.classList.add('on');
+    }catch(e){
+      hint.textContent='music could not be started';
+      hint.style.color='#a855f7';
+    }
+  }
+  area.addEventListener('click',e=>{
+    const r=canvas.getBoundingClientRect();
+    if(SETTINGS.clickBurst&&!reduced)burst(e.clientX-r.left,e.clientY-r.top);
+    enter();
+  });
+  area.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();enter()}});
+  audio.addEventListener('error',()=>{if(!playing)hint.textContent='add music.mp3 beside this HTML file'});
+
+  const key='santino_particle_intro_views';
+  try{const count=Number(localStorage.getItem(key)||0)+1;localStorage.setItem(key,count);document.getElementById('visits').textContent=count.toLocaleString()}catch{}
+  new ResizeObserver(resize).observe(area);
+  addEventListener('resize',resize);
+  resize();drawAmbient();cursorFrame();
+})();
+</script>
+</body>
+</html>
